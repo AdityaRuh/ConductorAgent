@@ -1,0 +1,46 @@
+linear:
+  teams:
+    - RUH
+    - SDR
+    - RP
+    - TT
+
+# Release targets — each defines Linear statuses + GitHub settings
+releases:
+  qa:
+    name: "QA Release"
+    target_statuses:
+      - name: "Ready to Deploy- QA"
+    # Transition for tickets already merged (skipped commits)
+    merged_transition:
+      name: "In QA"
+      ids:
+        RUH: "In QA"
+        SDR: "In QA"
+        RP: "In QA"
+        TT: "In QA"
+    github:
+      base_branch: qa
+      source_branch: dev              # Only scan commits from dev branch
+      release_branch_prefix: "release/qa-"
+      pr_labels:
+        - qa-release
+
+  prod:
+    name: "Prod Release"
+    target_statuses:
+      - name: "Approved for Prod"
+    # Transition for tickets already merged (skipped commits)
+    merged_transition:
+      name: "Released to Prod"
+      ids:
+        RUH: "Released to Prod"
+        SDR: "Released to Prod"
+        RP: "Released to Prod"
+        TT: "Released to Prod"
+    github:
+      base_branch: main
+      source_branch: qa               # Only scan commits from qa branch
+      release_branch_prefix: "release/prod-"
+      pr_labels:
+        - prod-release

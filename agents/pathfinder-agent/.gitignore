@@ -1,0 +1,20 @@
+# Runtime state
+memory/
+*.json
+
+# Obsidian
+knowledge-graph/.obsidian/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local

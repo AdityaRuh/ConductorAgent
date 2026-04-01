@@ -1,0 +1,19 @@
+# USER.md
+
+- **Name:** [Your Name]
+- **What to call them:** [Preferred name]
+- **Pronouns:** —
+- **Timezone:** [Your timezone, e.g. Asia/Kolkata]
+- **Notes:** [Brief context about your role and what you build]
+
+## Context
+
+[Add context about your team, repos, and priorities here]
+
+## Linear Configuration
+
+- **Linear API Key:** Set `LINEAR_API_KEY` env var
+- **Workspace:** [Your Linear workspace name]
+- **Teams to scan:** [all | specific team names]
+- **Todo status name:** [Todo | your custom status]
+- **In Progress status name:** [In Progress | your custom status]

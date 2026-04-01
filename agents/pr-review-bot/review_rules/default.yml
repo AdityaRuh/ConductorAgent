@@ -1,0 +1,20 @@
+checklist:
+  - has_tests
+  - no_secrets
+  - pr_description_complete
+  - no_console_logs
+
+severity_threshold: suggestion
+
+skip_files:
+  - "*.lock"
+  - "*.min.js"
+  - "*.min.css"
+  - "dist/**"
+  - "build/**"
+  - "node_modules/**"
+  - "*.pyc"
+  - "__pycache__/**"
+
+skip_options:
+  draft_prs: true

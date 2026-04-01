@@ -1,0 +1,14 @@
+# Repository configuration
+# Copy this to repos.yaml and add your repositories
+
+# Regex to extract Jira ticket IDs from commit messages
+# Default: looks for patterns like ABC-123 at the start of commit messages
+commit_pattern: "([A-Z]+-\\d+)"
+
+# List all GitHub repos to scan (just the repo name, not org/name)
+repositories:
+  - name: your-backend-repo
+    type: backend
+  - name: your-frontend-repo
+    type: frontend
+  # Add more repos as needed

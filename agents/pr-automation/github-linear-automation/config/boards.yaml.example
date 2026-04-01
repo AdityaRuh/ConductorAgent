@@ -1,0 +1,52 @@
+# Jira board configuration
+# Copy this to boards.yaml and customize for your organization
+
+jira:
+  boards:
+    - PROJ1      # Your Jira project keys
+    - PROJ2
+
+  issue_types:
+    - Story
+    - Bug
+    - Task
+    - Subtask
+
+# Release targets — each defines Jira statuses + GitHub settings
+releases:
+  qa:
+    name: "QA Release"
+    target_statuses:
+      # Status IDs vary per Jira instance — find yours via:
+      # curl -u email:token https://your-org.atlassian.net/rest/api/3/status
+      - name: "Ready to Deploy - QA"
+        ids: ["10001", "10002"]    # Status IDs for each board
+    # Transition for tickets already merged (skipped commits)
+    merged_transition:
+      name: "IN QA"
+      ids:
+        PROJ1: "IN QA"
+        PROJ2: "IN QA"
+    github:
+      base_branch: qa
+      source_branch: dev          # Only scan commits from this branch
+      release_branch_prefix: "release/qa-"
+      pr_labels:
+        - qa-release
+
+  prod:
+    name: "Prod Release"
+    target_statuses:
+      - name: "Approved for Prod"
+        ids: ["10003", "10004"]
+    merged_transition:
+      name: "RELEASED TO PROD"
+      ids:
+        PROJ1: "RELEASED TO PROD"
+        PROJ2: "RELEASED TO PROD"
+    github:
+      base_branch: main
+      source_branch: qa           # Only scan commits from qa branch
+      release_branch_prefix: "release/prod-"
+      pr_labels:
+        - prod-release
