@@ -1,0 +1,93 @@
+{
+  "ticketId": "",
+  "title": "",
+  "team": "",
+  "type": "unknown",
+  "priority": "medium",
+  "createdAt": "",
+  "currentStage": "pathfinder",
+  "status": "PENDING",
+  "stages": {
+    "pathfinder": {
+      "status": "PENDING",
+      "startedAt": null,
+      "completedAt": null,
+      "output": null,
+      "attempts": 0,
+      "tokensUsed": 0,
+      "lastError": null
+    },
+    "awaiting-approval": {
+      "status": "PENDING",
+      "startedAt": null,
+      "completedAt": null,
+      "output": null,
+      "attempts": 0,
+      "tokensUsed": 0,
+      "lastError": null
+    },
+    "nightshift": {
+      "status": "PENDING",
+      "startedAt": null,
+      "completedAt": null,
+      "output": null,
+      "attempts": 0,
+      "tokensUsed": 0,
+      "lastError": null
+    },
+    "review-loop": {
+      "status": "PENDING",
+      "startedAt": null,
+      "completedAt": null,
+      "output": null,
+      "attempts": 0,
+      "tokensUsed": 0,
+      "lastError": null
+    },
+    "pr-resolver": {
+      "status": "PENDING",
+      "startedAt": null,
+      "completedAt": null,
+      "output": null,
+      "attempts": 0,
+      "tokensUsed": 0,
+      "lastError": null
+    },
+    "pr-automation": {
+      "status": "PENDING",
+      "startedAt": null,
+      "completedAt": null,
+      "output": null,
+      "attempts": 0,
+      "tokensUsed": 0,
+      "lastError": null
+    }
+  },
+  "reviewLoop": {
+    "iteration": 0,
+    "maxIterations": 5,
+    "ciRepairAttempts": 0,
+    "maxCiRepairs": 3
+  },
+  "budget": {
+    "allocated": 100000,
+    "spent": 0,
+    "currency": "tokens"
+  },
+  "pr": {
+    "repo": null,
+    "number": null,
+    "branch": null,
+    "url": null,
+    "reviewStatus": null,
+    "ciStatus": null
+  },
+  "escalation": {
+    "escalated": false,
+    "reason": null,
+    "escalatedAt": null,
+    "resolvedAt": null,
+    "humanResponse": null
+  },
+  "updatedAt": ""
+}

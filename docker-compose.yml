@@ -1,0 +1,138 @@
+##############################################################################
+# Conductor Orchestrator — Master Docker Compose
+#
+# Usage:
+#   Start all agents:       docker compose up -d
+#   Start one agent:        docker compose up -d nightshift
+#   View logs:              docker compose logs -f nightshift
+#   Stop all:               docker compose down
+#   Restart one:            docker compose restart pr-resolver
+#
+# All agents share the master .env at this directory root.
+##############################################################################
+
+services:
+
+  # ──────────────────────────────────────────────────────────────────────
+  # [1] Pathfinder — Pre-coding analysis agent (every 30 min)
+  # ──────────────────────────────────────────────────────────────────────
+  pathfinder:
+    build:
+      context: ./agents/pathfinder-agent
+    container_name: pathfinder
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist processed issues memory
+      - pathfinder-memory:/app/memory
+      # Knowledge graph (read-only)
+      - ./agents/pathfinder-agent/knowledge-graph:/app/knowledge-graph:ro
+
+  # ──────────────────────────────────────────────────────────────────────
+  # [2] NightShift — Autonomous dev agent (every 60 min)
+  # ──────────────────────────────────────────────────────────────────────
+  nightshift:
+    build:
+      context: ./agents/NightShift
+    container_name: nightshift
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - GH_TOKEN=${GH_TOKEN}
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
+      - REPOS_DIR=/app/repos
+      - LOGS_DIR=/app/logs
+    volumes:
+      # Persist cloned repos
+      - nightshift-repos:/app/repos
+      # Persist logs
+      - nightshift-logs:/app/logs
+      # SSH key for private repos (read-only)
+      - ${SSH_KEY_PATH:-~/.ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
+      # Persist Claude Code credentials
+      - nightshift-claude:/root/.claude
+      # Persist gh CLI credentials
+      - nightshift-gh:/root/.config/gh
+      # Mount Sentinel Guardian skills (read-only)
+      - ${SENTINEL_SKILLS_PATH:-~/.openclaw/workspace/sentinel-guardian/skills}:/app/sentinel-skills:ro
+
+  # ──────────────────────────────────────────────────────────────────────
+  # [3] PR Review Bot — Webhook server (event-driven)
+  # ──────────────────────────────────────────────────────────────────────
+  pr-review-bot:
+    build:
+      context: ./agents/pr-review-bot
+    container_name: pr-review-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ──────────────────────────────────────────────────────────────────────
+  # [4] PR Resolver — Review comment resolver (every 30 min)
+  # ──────────────────────────────────────────────────────────────────────
+  pr-resolver:
+    build:
+      context: ./agents/pr-resolver
+    container_name: pr-resolver
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - GH_TOKEN=${GH_TOKEN}
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
+      - REPOS_BASE_DIR=/app/repos
+    volumes:
+      # Persist cloned repos
+      - pr-resolver-repos:/app/repos
+      # Persist state (processed comments)
+      - pr-resolver-state:/app/state
+      # Persist logs
+      - pr-resolver-logs:/app/logs
+      # SSH key for private repos (read-only)
+      - ${SSH_KEY_PATH:-~/.ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
+
+  # ──────────────────────────────────────────────────────────────────────
+  # [5] PR Automation — Release automation (on-demand)
+  #     Not auto-started. Run manually:
+  #       docker compose run --rm pr-automation
+  #       docker compose run --rm -e RELEASE_TARGET=prod pr-automation
+  # ──────────────────────────────────────────────────────────────────────
+  pr-automation:
+    build:
+      context: ./agents/pr-automation
+    container_name: pr-automation
+    env_file:
+      - .env
+    environment:
+      - GH_TOKEN=${GH_TOKEN}
+      - GITHUB_TOKEN=${GH_TOKEN}
+      - GITHUB_ORG=${GITHUB_ORG:-ruh-ai}
+      - RELEASE_TARGET=${RELEASE_TARGET:-qa}
+    volumes:
+      # Persist cloned repos for cherry-pick
+      - pr-automation-repos:/app/repos
+      # SSH key (read-only)
+      - ${SSH_KEY_PATH:-~/.ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
+    profiles:
+      - manual  # Won't start with `docker compose up -d`, needs explicit run
+
+volumes:
+  pathfinder-memory:
+  nightshift-repos:
+  nightshift-logs:
+  nightshift-claude:
+  nightshift-gh:
+  pr-resolver-repos:
+  pr-resolver-state:
+  pr-resolver-logs:
+  pr-automation-repos:

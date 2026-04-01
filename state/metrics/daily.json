@@ -1,0 +1,56 @@
+{
+  "date": "2026-04-01",
+  "cycles": 3,
+  "tasksCreated": 0,
+  "tasksAdvanced": 0,
+  "tasksCompleted": 0,
+  "tasksFailed": 0,
+  "tasksEscalated": 1,
+  "totalTokensConsumed": 0,
+  "agentBreakdown": {
+    "pathfinder":    { "runs": 0, "successes": 0, "failures": 0, "tokens": 0 },
+    "nightshift":    { "runs": 0, "successes": 0, "failures": 0, "tokens": 0 },
+    "pr-review-bot": { "runs": 0, "successes": 0, "failures": 0, "tokens": 0 },
+    "pr-resolver":   { "runs": 0, "successes": 0, "failures": 0, "tokens": 0 },
+    "pr-automation": { "runs": 0, "successes": 0, "failures": 0, "tokens": 0 }
+  },
+  "reviewLoopIterations": 0,
+  "escalations": [
+    {
+      "at": "2026-04-01T13:39:00Z",
+      "type": "infrastructure",
+      "severity": "critical",
+      "component": "conductor-exec",
+      "message": "exec tool blocked for 3 consecutive cycles (13:09, 13:24, 13:39 UTC) due to gateway pairing required. Linear API, GitHub, PR Review Bot health, and NightShift Docker all unobservable. Telegram delivery also blocked by same constraint.",
+      "actionNeeded": "Run `openclaw gateway start` or complete gateway pairing on the host machine.",
+      "delivered": false,
+      "deliveryBlockedReason": "exec unavailable — Telegram curl unreachable"
+    }
+  ],
+  "cycleLog": [
+    {
+      "cycleNumber": 1,
+      "cycleAt": "2026-04-01T13:09:00Z",
+      "tasksAdvanced": [],
+      "tasksBlocked": [],
+      "tasksCompleted": [],
+      "notes": "Bootstrap cycle. All agents status=unknown (never run). exec/gateway unavailable — Linear API and PR Review Bot health check skipped. No active tasks in pipeline."
+    },
+    {
+      "cycleNumber": 2,
+      "cycleAt": "2026-04-01T13:24:00Z",
+      "tasksAdvanced": [],
+      "tasksBlocked": [],
+      "tasksCompleted": [],
+      "notes": "No change from cycle 1. exec/gateway still unavailable. No active tasks."
+    },
+    {
+      "cycleNumber": 3,
+      "cycleAt": "2026-04-01T13:39:00Z",
+      "tasksAdvanced": [],
+      "tasksBlocked": [],
+      "tasksCompleted": [],
+      "notes": "exec blocked for 3rd consecutive cycle. Systemic infrastructure escalation recorded. Telegram delivery also blocked — escalation surfaced to human via heartbeat reply channel. No active tasks in pipeline."
+    }
+  ]
+}

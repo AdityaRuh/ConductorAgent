@@ -1,0 +1,18 @@
+{
+  "agentId": "pr-review-bot",
+  "location": "agents/pr-review-bot/",
+  "type": "fastapi-webhook",
+  "interval": "event-driven",
+  "healthEndpoint": "http://localhost:8000/health",
+  "lastRunAt": null,
+  "lastSuccessAt": null,
+  "lastFailureAt": null,
+  "consecutiveFailures": 0,
+  "totalRuns": 0,
+  "totalFailures": 0,
+  "averageLatencyMs": 0,
+  "status": "unknown",
+  "lastError": null,
+  "conductorObservedAt": "2026-04-01T13:39:00Z",
+  "conductorNote": "Cycle 3 — health check unverifiable. exec/curl blocked for 3rd consecutive cycle."
+}

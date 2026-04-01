@@ -1,0 +1,17 @@
+# Secrets
+.env
+*.env.local
+
+# Cloned agent repos (tracked as submodules or separately)
+agents/pathfinder-agent/
+agents/NightShift/
+agents/pr-review-bot/
+agents/pr-resolver/
+agents/pr-automation/
+
+# Docker volumes
+repos/
+logs/
+
+# OS
+.DS_Store

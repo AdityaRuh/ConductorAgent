@@ -1,0 +1,18 @@
+{
+  "agentId": "pathfinder",
+  "location": "agents/pathfinder-agent/",
+  "type": "openclaw-heartbeat",
+  "interval": "30m",
+  "lastRunAt": null,
+  "lastSuccessAt": null,
+  "lastFailureAt": null,
+  "consecutiveFailures": 0,
+  "totalRuns": 0,
+  "totalSuccesses": 0,
+  "totalFailures": 0,
+  "averageLatencyMs": 0,
+  "status": "unknown",
+  "lastError": null,
+  "conductorObservedAt": "2026-04-01T13:39:00Z",
+  "conductorNote": "Cycle 3 — no change. Agent never run. exec blocked for 3rd consecutive cycle."
+}
