@@ -1,12 +1,23 @@
 ##############################################################################
 # Conductor Orchestrator — Master Docker Compose
 #
+# Services (auto-started with `docker compose up -d`):
+#   [1] pathfinder       — Pre-coding analysis agent (every 30 min)
+#   [2] nightshift       — Autonomous dev agent (every 60 min)
+#   [3] pr-review-bot    — Webhook server on :8000 (event-driven)
+#   [4] pr-resolver      — Review comment resolver (every 30 min)
+#   [5] mission-control  — Operations dashboard on :3000
+#
+# On-demand only (run with `docker compose run --rm <name>`):
+#   [6] pr-automation    — Release automation (--profile manual)
+#
 # Usage:
-#   Start all agents:       docker compose up -d
-#   Start one agent:        docker compose up -d nightshift
+#   Start everything:       docker compose up -d
+#   Start one:              docker compose up -d nightshift
 #   View logs:              docker compose logs -f nightshift
 #   Stop all:               docker compose down
 #   Restart one:            docker compose restart pr-resolver
+#   Dashboard:              http://localhost:3000 (admin / ConductorAdmin2026!)
 #
 # All agents share the master .env at this directory root.
 ##############################################################################
@@ -102,7 +113,51 @@ services:
       - ${SSH_KEY_PATH:-~/.ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
 
   # ──────────────────────────────────────────────────────────────────────
-  # [5] PR Automation — Release automation (on-demand)
+  # [5] Mission Control — Orchestrator dashboard (always running)
+  #     Access at: http://localhost:3000
+  #     Login: admin / ConductorAdmin2026! (set AUTH_USER/AUTH_PASS in .env)
+  # ──────────────────────────────────────────────────────────────────────
+  mission-control:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: mission-control
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - AUTH_USER=${MC_AUTH_USER:-admin}
+      - AUTH_PASS=${MC_AUTH_PASS:-ConductorAdmin2026!}
+      - MC_ALLOWED_HOSTS=${MC_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - MC_COOKIE_SAMESITE=${MC_COOKIE_SAMESITE:-strict}
+      # Server-side: reach OpenClaw gateway via host machine
+      - OPENCLAW_GATEWAY_HOST=host.docker.internal
+      - OPENCLAW_GATEWAY_PORT=${OPENCLAW_GATEWAY_PORT:-18789}
+      # Browser-side: user's browser connects to the host machine
+      - NEXT_PUBLIC_GATEWAY_HOST=${NEXT_PUBLIC_GATEWAY_HOST:-127.0.0.1}
+      - NEXT_PUBLIC_GATEWAY_PORT=${NEXT_PUBLIC_GATEWAY_PORT:-18789}
+      - NEXT_PUBLIC_GATEWAY_PROTOCOL=${NEXT_PUBLIC_GATEWAY_PROTOCOL:-ws}
+      - NEXT_PUBLIC_GATEWAY_CLIENT_ID=openclaw-control-ui
+      - MC_DEFAULT_GATEWAY_NAME=primary
+      - MC_COORDINATOR_AGENT=conductor
+      - NEXT_PUBLIC_COORDINATOR_AGENT=conductor
+      - OPENCLAW_HOME=/data/openclaw
+      - OPENCLAW_TOOLS_PROFILE=coding
+      - MISSION_CONTROL_DATA_DIR=/data/mission-control
+      # Pass through NODE_ENV
+      - NODE_ENV=production
+    volumes:
+      # Persist dashboard SQLite DB and session data
+      - mission-control-data:/data/mission-control
+      # Read OpenClaw state (conductor state files, metrics, agent health)
+      - ${OPENCLAW_HOME:-~/.openclaw}:/data/openclaw:ro
+    extra_hosts:
+      # Allow container to reach host machine's OpenClaw gateway
+      - "host.docker.internal:host-gateway"
+
+  # ──────────────────────────────────────────────────────────────────────
+  # [6] PR Automation — Release automation (on-demand)
   #     Not auto-started. Run manually:
   #       docker compose run --rm pr-automation
   #       docker compose run --rm -e RELEASE_TARGET=prod pr-automation
@@ -127,6 +182,7 @@ services:
       - manual  # Won't start with `docker compose up -d`, needs explicit run
 
 volumes:
+  mission-control-data:
   pathfinder-memory:
   nightshift-repos:
   nightshift-logs:
