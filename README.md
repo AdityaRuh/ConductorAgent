@@ -340,6 +340,14 @@ Conductor escalates to Telegram when autonomous resolution is insufficient:
 │       ├── Dockerfile
 │       └── entrypoint.sh
 │
+├── dashboard/                       # [6] Mission Control — operations dashboard
+│   ├── src/                         # Next.js app (pages, API routes, components)
+│   ├── public/                      # Static assets
+│   ├── Dockerfile                   # Multi-stage build (standalone output)
+│   ├── docker-entrypoint.sh
+│   ├── .env.local                   # Local dashboard config
+│   └── .data/                       # SQLite DB + session data (gitignored)
+│
 ├── skills/                          # Conductor-specific skills
 │   ├── task-routing/SKILL.md        # Linear state → agent routing
 │   ├── failure-classification/SKILL.md
@@ -444,15 +452,72 @@ openclaw agent --workspace . --local -p "Execute Phase 1 OBSERVE only. Check Lin
 
 ---
 
+## Mission Control Dashboard
+
+Mission Control is the operations dashboard for monitoring and managing all agents in the pipeline. Built with Next.js and backed by SQLite.
+
+```
+http://localhost:3000
+Login: admin / ConductorAdmin2026!
+```
+
+### What You Can See
+
+| Panel | Description |
+|-------|-------------|
+| **Fleet Overview** | All 6 agents with live status (healthy/degraded/offline) |
+| **Agents** | Individual agent details, last heartbeat, uptime, error count |
+| **Tasks** | Active task queue with Linear ticket mapping and pipeline stage |
+| **Activity Feed** | Real-time log of agent actions, state transitions, escalations |
+| **Chat** | Send commands to agents via the OpenClaw gateway |
+| **Memory** | Browse agent memory and knowledge graph |
+| **Cron** | View and manage agent heartbeat schedules |
+| **Webhooks** | Monitor incoming GitHub webhook events |
+| **Alerts** | Escalation history and unresolved warnings |
+| **Security Audit** | Agent permission usage and tool call logs |
+| **Cost Tracking** | Token usage per agent and per task |
+| **Settings** | Gateway config, agent registration, credentials |
+
+### Access
+
+Mission Control starts automatically with `docker compose up -d` on port **3000**.
+
+To run standalone (without Docker):
+
+```bash
+cd dashboard
+pnpm install
+pnpm build
+pnpm start
+```
+
+### Configuration
+
+Set these in `.env` (see `.env.example` for all options):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MC_PORT` | `3000` | Dashboard port |
+| `MC_AUTH_USER` | `admin` | Login username |
+| `MC_AUTH_PASS` | `changeme` | Login password |
+| `OPENCLAW_GATEWAY_HOST` | `127.0.0.1` | OpenClaw gateway host (server-side) |
+| `OPENCLAW_GATEWAY_PORT` | `18789` | OpenClaw gateway port |
+| `NEXT_PUBLIC_GATEWAY_HOST` | `127.0.0.1` | Gateway host (browser-side) |
+| `NEXT_PUBLIC_GATEWAY_PORT` | `18789` | Gateway port (browser-side) |
+| `NEXT_PUBLIC_GATEWAY_PROTOCOL` | `ws` | `ws` for local, `wss` for production (secure WebSocket) |
+| `OPENCLAW_HOME` | `~/.openclaw` | Where agent state, metrics, and config live |
+
+---
+
 ## Docker Commands
 
 | Command | Description |
 |---------|------------|
-| `docker compose up -d` | Start all 4 continuous agents |
+| `docker compose up -d` | Start all 5 services (4 agents + dashboard) |
 | `docker compose ps` | Check running containers |
-| `docker compose logs -f <agent>` | Follow logs for one agent |
-| `docker compose restart <agent>` | Restart a specific agent |
-| `docker compose down` | Stop all agents |
+| `docker compose logs -f <service>` | Follow logs for one service |
+| `docker compose restart <service>` | Restart a specific service |
+| `docker compose down` | Stop all services |
 | `docker compose run --rm pr-automation` | Run QA release (on-demand) |
 | `docker compose run --rm -e RELEASE_TARGET=prod pr-automation` | Run Prod release |
 
@@ -476,6 +541,11 @@ openclaw agent --workspace . --local -p "Execute Phase 1 OBSERVE only. Check Lin
 | `SENTINEL_SKILLS_PATH` | NightShift | Default: `~/.openclaw/workspace/sentinel-guardian/skills` |
 | `BOT_GITHUB_USER` | PR Resolver | Default: `AdityaRuh` |
 | `LINEAR_ASSIGNEE_EMAIL` | PR Resolver | Yes |
+| `MC_PORT` | Mission Control | Default: `3000` |
+| `MC_AUTH_USER` | Mission Control | Default: `admin` |
+| `MC_AUTH_PASS` | Mission Control | Yes |
+| `OPENCLAW_GATEWAY_PORT` | Mission Control | Default: `18789` |
+| `OPENCLAW_HOME` | Mission Control | Default: `~/.openclaw` |
 
 ---
 
@@ -528,3 +598,4 @@ openclaw agent --workspace . --local -p "Execute Phase 1 OBSERVE only. Check Lin
 - [GitHub](https://github.com) — Code hosting, PRs, CI/CD
 - [Telegram](https://telegram.org) — Human escalation channel
 - [Docker](https://docker.com) — Agent isolation and deployment
+- [Mission Control](https://github.com/builderz-labs/mission-control) — Operations dashboard
