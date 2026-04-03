@@ -1,3 +1,4 @@
+from typing import Optional, Dict, List, Any
 """PR Review Bot — Webhook proxy that triggers Sentinel via OpenClaw + Slack notification."""
 
 import asyncio
@@ -18,7 +19,7 @@ from app.linear_client import LinearClient, extract_ticket_id
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-_debounce: dict[str, float] = {}
+_debounce: Dict[str, float] = {}
 DEBOUNCE_SECONDS = 30
 _start_time = time.time()
 
@@ -82,21 +83,78 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
     pr_key = f"{repo.get('full_name')}#{payload.get('number')}"
 
-    if action == "synchronize":
-        _debounce[pr_key] = time.time()
-        background_tasks.add_task(_debounced_dispatch, pr_key=pr_key, payload=payload, action=action)
-    else:
-        background_tasks.add_task(dispatch_to_sentinel, payload=payload, action=action)
+    # All events: debounce 30s then verify Linear ticket is in Code Review before acting.
+    # This makes the bot independent of the webhook timing — it always checks Linear state
+    # before dispatching to Sentinel, regardless of whether the event is opened/synchronize/reopened.
+    _debounce[pr_key] = time.time()
+    background_tasks.add_task(
+        _debounced_dispatch_with_linear_check,
+        pr_key=pr_key,
+        payload=payload,
+        action=action,
+    )
 
-    return {"action": "dispatched", "pr": pr_key, "target": "sentinel-reviewer"}
+    return {"action": "queued", "pr": pr_key, "note": "will verify Linear state in 30s before dispatching"}
 
 
-async def _debounced_dispatch(pr_key: str, payload: dict, action: str):
+async def _debounced_dispatch_with_linear_check(pr_key: str, payload: dict, action: str):
+    """Wait 30s (debounce), then verify the Linear ticket is in Code Review before dispatching.
+
+    This decouples the bot from webhook timing — it won't review a PR unless Linear
+    confirms the ticket is actually in Code Review state.
+    """
     scheduled_at = _debounce.get(pr_key, 0)
     await asyncio.sleep(DEBOUNCE_SECONDS)
+
+    # Debounce: if a newer event arrived for the same PR, drop this one
     if _debounce.get(pr_key, 0) != scheduled_at:
-        logger.info("Debounced: skipping stale synchronize event for %s", pr_key)
+        logger.info("Debounced: skipping stale event for %s", pr_key)
         return
+
+    cfg = get_config()
+    pr = payload.get("pull_request", {})
+    branch_name = pr.get("head", {}).get("ref", "")
+    ticket_id = extract_ticket_id(branch_name)
+
+    if not ticket_id:
+        logger.info(
+            "%s: no Linear ticket ID in branch '%s' — skipping Linear check, dispatching directly",
+            pr_key, branch_name,
+        )
+        await dispatch_to_sentinel(payload=payload, action=action)
+        return
+
+    if not cfg.linear_api_key:
+        logger.info("%s: no LINEAR_API_KEY configured — skipping Linear check, dispatching directly", pr_key)
+        await dispatch_to_sentinel(payload=payload, action=action)
+        return
+
+    # Check Linear state
+    linear = LinearClient(api_key=cfg.linear_api_key)
+    try:
+        issue = await linear.find_issue(ticket_id)
+        if not issue:
+            logger.warning("%s: Linear ticket %s not found — skipping review", pr_key, ticket_id)
+            return
+
+        current_state = issue["state"]["name"]
+        if current_state.lower() != "code review":
+            logger.info(
+                "%s: Linear ticket %s is in '%s', not 'Code Review' — skipping Sentinel dispatch",
+                pr_key, ticket_id, current_state,
+            )
+            return
+
+        logger.info(
+            "%s: Linear ticket %s confirmed in 'Code Review' — dispatching to Sentinel",
+            pr_key, ticket_id,
+        )
+    except Exception as e:
+        logger.error("%s: Linear state check failed for %s: %s — skipping review", pr_key, ticket_id, e)
+        return
+    finally:
+        await linear.close()
+
     await dispatch_to_sentinel(payload=payload, action=action)
 
 
@@ -175,9 +233,9 @@ async def dispatch_to_sentinel(payload: dict, action: str):
             logger.error("Failed to dispatch to Sentinel for %s#%d: %s", full_name, pr_number, e)
             return
 
-    # Transition Linear ticket to "Code Review" when PR is opened
-    if ticket_id and cfg.linear_api_key:
-        await _transition_linear_ticket(cfg, ticket_id, "Code Review", pr_url)
+    # NOTE: Bot is now read-only w.r.t. Linear.
+    # Linear state check already happened in _debounced_dispatch_with_linear_check.
+    # No state writes here — NightShift and PR Resolver own Linear transitions.
 
     # Step 2: Poll for Sentinel's GitHub review, then send Slack notification
     review_body = await _poll_for_sentinel_review(full_name, pr_number, cfg.github_pat)
@@ -207,10 +265,10 @@ async def dispatch_to_sentinel(payload: dict, action: str):
         if ticket_id and cfg.linear_api_key:
             has_issues = "P1" in review_body or ":red_circle:" in review_body or "P2" in review_body
             if has_issues:
-                # Issues found — try "Require Changes", fallback to "In Development"
+                # Issues found — transition to "Require Changes" only
                 await _transition_linear_ticket(
                     cfg, ticket_id,
-                    ["Require Changes", "In Development"],
+                    ["REQUIRE CHANGES"],
                     pr_url,
                 )
             else:
@@ -224,7 +282,7 @@ async def dispatch_to_sentinel(payload: dict, action: str):
         logger.warning("No Sentinel review found for %s#%d after polling — skipping Slack", full_name, pr_number)
 
 
-async def _poll_for_sentinel_review(full_name: str, pr_number: int, github_pat: str, max_wait: int = 300, interval: int = 15) -> str | None:
+async def _poll_for_sentinel_review(full_name: str, pr_number: int, github_pat: str, max_wait: int = 300, interval: int = 15) -> Optional[str]:
     """Poll the PR for a Sentinel review comment. Returns the review body or None.
 
     Skips early if the GitHub API returns 404 three times consecutively
@@ -293,7 +351,7 @@ async def _send_slack_notification(
     pr_title: str,
     pr_url: str,
     pr_author: str,
-    pr_author_email: str | None,
+    pr_author_email: Optional[str],
     review_body: str,
     is_incremental: bool,
 ):
@@ -360,7 +418,7 @@ async def _send_slack_notification(
         logger.error("Failed to send Slack notification for %s#%d: %s", full_name, pr_number, e)
 
 
-async def _transition_linear_ticket(cfg, ticket_id: str, target_states: str | list[str], pr_url: str):
+async def _transition_linear_ticket(cfg, ticket_id: str, target_states: Any, pr_url: str):
     """Transition a Linear ticket to the given state (tries multiple fallbacks)."""
     if isinstance(target_states, str):
         target_states = [target_states]
