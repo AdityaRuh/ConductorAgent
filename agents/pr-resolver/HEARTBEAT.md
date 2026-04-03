@@ -43,7 +43,7 @@ gh api repos/{owner}/{repo}/issues/{pr}/comments
 - Skip bot's own comments (`BOT_SIGNATURE` check)
 - Skip CI bot comments (codecov, dependabot, etc.)
 
-### 6. Classify Intent
+### 6. Classify Intent (ALL comments first, then batch)
 **Stage 1 — Rule-based (FREE)**
 - Bot comments → `SELF` / `CI_BOT`
 - Self comments → `SELF`
@@ -56,11 +56,13 @@ gh api repos/{owner}/{repo}/issues/{pr}/comments
 
 | Intent | Action |
 |--------|--------|
-| `SELF / CI_BOT / APPROVAL / UNKNOWN` | Skip |
-| `AGENT_COMMAND` | Execute command |
-| `SUBJECTIVE` | Escalate to Telegram |
-| `QUESTION` | Generate explanation reply |
-| `CODE_CHANGE / NITPICK / EXPLICIT_REQUEST` | Proceed to fix ↓ |
+| `SELF / CI_BOT / APPROVAL / UNKNOWN` | Skip immediately |
+| `AGENT_COMMAND` | Execute command immediately |
+| `SUBJECTIVE` | Escalate to Telegram immediately |
+| `QUESTION` | Include in batch (answered by fixer) |
+| `CODE_CHANGE / NITPICK / EXPLICIT_REQUEST` | Queue for batch fix |
+
+**All actionable comments are collected first, then resolved in a SINGLE fixer agent call.**
 
 ### 8. Context Summarization (FAST LLM)
 - Summarize ticket content, requirements, acceptance criteria
@@ -166,7 +168,7 @@ Completed for <TICKET-ID>:
 
 | Limit | Value |
 |-------|-------|
-| Max fixes per PR per cycle | 3 |
+| Comments per batch (per PR) | unlimited (all at once) |
 | Max fixes per cycle total | 10 |
 | Max fixes per hour | 20 |
 | Agent timeout per comment | 600s |

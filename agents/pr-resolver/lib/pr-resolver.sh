@@ -62,10 +62,10 @@ BOT_GITHUB_USER="${BOT_GITHUB_USER:-AdityaRuh}"
 
 # Linear integration
 LINEAR_API_KEY="${LINEAR_API_KEY:-}"
-LINEAR_TRIGGER_STATE="Require Changes"
+LINEAR_TRIGGER_STATE="REQUIRE CHANGES"
 
 # Rate limits
-MAX_FIXES_PER_PR=3
+MAX_FIXES_PER_PR=10
 MAX_FIXES_PER_CYCLE=10
 MAX_FIXES_PER_HOUR=20
 OPENCLAW_TIMEOUT=600  # 10 min per comment
@@ -130,11 +130,12 @@ wait_for_pr_checks() {
 
         # Get check status (gh pr checks uses 'state' field, not 'conclusion')
         local checks_json
-        checks_json=$(gh pr checks "$pr" --repo "$repo" --json state,name 2>/dev/null) || {
-            log "WARNING: Failed to fetch checks for PR #${pr}. Retrying in 30s..."
-            sleep 30
-            continue
-        }
+        checks_json=$(gh pr checks "$pr" --repo "$repo" --json state,name 2>/dev/null) || checks_json="[]"
+        # gh exits non-zero when no checks configured — treat empty as success
+        if [[ -z "$checks_json" || "$checks_json" == "[]" ]]; then
+            log "CI SUCCESS: No checks configured — treating as green ✅"
+            return 0
+        fi
 
         # If no checks configured, treat as success
         local total_checks
@@ -529,8 +530,13 @@ classify_comment() {
         return
     fi
 
-    # Skip: CI bot comments (codecov, sonarqube, dependabot, etc.)
-    if echo "$body_lower" | grep -qE '(codecov|sonarqube|dependabot|renovate|github-actions|coverage report|cr-gpt|chatgpt-codex|openai_api_key seted)'; then
+    # Skip: CI bot comments (codecov, sonarqube, dependabot, bot accounts, etc.)
+    if echo "$body_lower" | grep -qE '(codecov|sonarqube|dependabot|renovate|github-actions|coverage report|cr-gpt|chatgpt-codex|openai_api_key seted|overage spend limit|code review skipped|automated review|codex review|codex in github)'; then
+        echo "CI_BOT"
+        return
+    fi
+    # Skip: known bot GitHub usernames acting as reviewers
+    if echo "$author" | grep -qiE '(^claude$|chatgpt-codex|codex-connector|dependabot|renovate|github-actions|codecov|sonarqube)'; then
         echo "CI_BOT"
         return
     fi
@@ -550,6 +556,30 @@ classify_comment() {
         return
     fi
 
+    # Sentinel review body (top-level PR review with P1/P2/P3 summary)
+    if echo "$body" | grep -qE '^##.*Sentinel Review'; then
+        echo "SENTINEL_REVIEW"
+        return
+    fi
+
+    # P1 blocking items — concrete code changes required
+    if echo "$body" | grep -qE '(🔴.*P1|\*\*🔴 P1)'; then
+        echo "CODE_CHANGE"
+        return
+    fi
+
+    # P2 should-fix items
+    if echo "$body" | grep -qE '(🟡.*P2|\*\*🟡 P2)'; then
+        echo "CODE_CHANGE"
+        return
+    fi
+
+    # P3 observations — informational only, never fix
+    if echo "$body" | grep -qE '(🟢.*P3|\*\*🟢 P3)'; then
+        echo "OBSERVATION"
+        return
+    fi
+
     # --- LLM SEMANTIC TIER (fast model, handles nuance, sarcasm, implicit intent) ---
     classify_comment_llm "$body"
 }
@@ -565,44 +595,39 @@ handle_agent_command() {
 
     case "$cmd" in
         ignore|skip)
-            reply_to_review_comment "$repo" "$pr" "$comment_id" \
-                "👋 **Acknowledged** — Ignoring this comment as requested by @${author}.\n\n— ${BOT_SIGNATURE}"
+            # Silent — state change only, no GitHub reply
             mark_comment_processed "$repo" "$pr" "$comment_id" "AGENT_COMMAND" "ignored"
-            log "Agent command: ignore comment #${comment_id} by @${author}"
+            log "Agent command: ignore comment #${comment_id} by @${author} (silent)"
             ;;
         retry)
-            reply_to_review_comment "$repo" "$pr" "$comment_id" \
-                "🔄 **Retrying** — Will re-attempt the fix on next cycle.\n\n— ${BOT_SIGNATURE}"
-            # Atomically remove from processed list so it gets picked up again
+            # Silent — reset processed state so next cycle picks it up
             local tmp="${PROCESSED_FILE}.tmp"
             jq --arg r "$repo" --arg p "$pr" --arg c "$comment_id" '
                 .[$r][$p].processed_comment_ids |= (. // [] | map(select(. != ($c | tonumber))))
             ' "$PROCESSED_FILE" > "$tmp" && mv "$tmp" "$PROCESSED_FILE"
             mark_comment_processed "$repo" "$pr" "$comment_id" "AGENT_COMMAND" "retry_queued"
-            log "Agent command: retry requested for comment #${comment_id} by @${author}"
+            log "Agent command: retry queued for comment #${comment_id} by @${author} (silent)"
             ;;
         force-fix)
-            reply_to_review_comment "$repo" "$pr" "$comment_id" \
-                "⚡ **Force-fix mode** — Will attempt fix with elevated confidence threshold.\n\n— ${BOT_SIGNATURE}"
+            # Silent — state change only
             mark_comment_processed "$repo" "$pr" "$comment_id" "AGENT_COMMAND" "force_fix_queued"
-            log "Agent command: force-fix requested by @${author}"
+            log "Agent command: force-fix queued by @${author} (silent)"
             ;;
         explain)
+            # Only command that gets a GitHub reply — human explicitly asked for status
             reply_to_review_comment "$repo" "$pr" "$comment_id" \
                 "📊 **PR Resolver Status**\n\n$(get_pr_status_text "$repo" "$pr")\n\n— ${BOT_SIGNATURE}"
             mark_comment_processed "$repo" "$pr" "$comment_id" "AGENT_COMMAND" "explained"
-            log "Agent command: explain requested by @${author}"
+            log "Agent command: explain — posted status to PR #${pr}"
             ;;
         pause)
-            reply_to_review_comment "$repo" "$pr" "$comment_id" \
-                "⏸️ **Paused** — Will not process further comments on this PR until resumed.\n\n— ${BOT_SIGNATURE}"
-            # Mark PR as paused
+            # Silent — state change only
             local tmp="${PROCESSED_FILE}.tmp"
             jq --arg r "$repo" --arg p "$pr" '
                 .[$r][$p].paused = true
             ' "$PROCESSED_FILE" > "$tmp" && mv "$tmp" "$PROCESSED_FILE"
             mark_comment_processed "$repo" "$pr" "$comment_id" "AGENT_COMMAND" "paused"
-            log "Agent command: pause requested by @${author} on PR #${pr}"
+            log "Agent command: pause set on PR #${pr} by @${author} (silent)"
             ;;
     esac
 }
@@ -878,7 +903,8 @@ resolve_comment() {
     # Clone/pull the repo if needed
     if [[ ! -d "$repo_dir" ]]; then
         log "Cloning ${repo}..."
-        git clone "https://github.com/${repo}.git" "$repo_dir" 2>/dev/null || {
+        local clone_url="https://${BOT_GITHUB_USER:-AdityaRuh}:${GH_TOKEN:-${GITHUB_TOKEN:-}}@github.com/${repo}.git"
+        git clone "$clone_url" "$repo_dir" 2>/dev/null || {
             log "ERROR: Failed to clone ${repo}"
             return 1
         }
@@ -1016,8 +1042,8 @@ Instructions:
     # Parse result
     if [[ $exit_code -eq 124 ]]; then
         log "TIMEOUT resolving comment #${comment_id}"
-        reply_to_review_comment "$repo" "$pr" "$comment_id" \
-            "⏱️ **Timed out** — This comment requires more complex changes than I can handle automatically. Needs human review.\n\n— ${BOT_SIGNATURE}"
+        # No GitHub reply — failure is surfaced in the batch summary or Telegram only
+        tg_send "⏱️ *Timeout* on ${repo} PR #${pr} comment #${comment_id}. Needs human review."
         mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "timeout"
         record_metric "failed" "$fix_duration" "timeout"
         return 1
@@ -1033,41 +1059,33 @@ Instructions:
     fi
     log "Fixer assessment: confidence=${confidence}, risk=${risk}"
 
-    # Check for NEEDS_CLARIFICATION
+    # Check for NEEDS_CLARIFICATION — log only, no GitHub reply (batch summary handles it)
     if echo "$output" | grep -q "NEEDS_CLARIFICATION:"; then
         local question
         question=$(echo "$output" | grep "NEEDS_CLARIFICATION:" | head -1 | sed 's/.*NEEDS_CLARIFICATION: *//')
-        reply_to_review_comment "$repo" "$pr" "$comment_id" \
-            "❓ **Clarification needed** (confidence: ${confidence})\n\n${question}\n\n— ${BOT_SIGNATURE}"
+        log "NEEDS_CLARIFICATION on comment #${comment_id}: ${question}"
         mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "clarification"
         record_metric "failed" "$fix_duration" "needs_clarification"
-        log "Asked for clarification on comment #${comment_id}"
         return 0
     fi
 
-    # Check for SUBJECTIVE
+    # Check for SUBJECTIVE — Telegram only, no GitHub reply
     if echo "$output" | grep -q "SUBJECTIVE:"; then
         local reason
         reason=$(echo "$output" | grep "SUBJECTIVE:" | head -1 | sed 's/.*SUBJECTIVE: *//')
-        # Clean up any uncommitted changes since fixer decided not to proceed
         cd "$repo_dir" && git checkout -- . 2>/dev/null || true
         tg_send "🤔 *Subjective comment on ${repo} PR #${pr}*\nComment by @${author}: ${body}\nReason: ${reason}"
-        reply_to_review_comment "$repo" "$pr" "$comment_id" \
-            "🤔 **Flagged for human review** — This seems like a design decision that needs team input.\n\n— ${BOT_SIGNATURE}"
         mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "flagged"
         record_metric "flagged" "$fix_duration"
-        log "Flagged subjective comment #${comment_id} to Telegram"
+        log "Flagged subjective comment #${comment_id} to Telegram (no GitHub reply)"
         return 0
     fi
 
-    # Check for FAILED
+    # Check for FAILED — Telegram only, no GitHub reply
     if echo "$output" | grep -q "FAILED:"; then
         local failure
         failure=$(echo "$output" | grep "FAILED:" | head -1 | sed 's/.*FAILED: *//')
-        # Clean up any partial uncommitted changes
         cd "$repo_dir" && git checkout -- . 2>/dev/null || true
-        reply_to_review_comment "$repo" "$pr" "$comment_id" \
-            "⚠️ **Attempted but blocked**\n\n${failure}\n\nNeeds human review.\n\n— ${BOT_SIGNATURE}"
         tg_send "❌ *Failed to fix comment on ${repo} PR #${pr}*\n${failure}"
         mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "failed"
         record_metric "failed" "$fix_duration" "agent_failed"
@@ -1075,15 +1093,11 @@ Instructions:
         return 1
     fi
 
-    # Check for ANSWER (question intent)
+    # Check for ANSWER (question intent) — log only, included in batch summary
     if echo "$output" | grep -q "ANSWER:"; then
-        local answer
-        answer=$(echo "$output" | grep -A 100 "ANSWER:" | head -20 | sed 's/.*ANSWER: *//')
-        reply_to_review_comment "$repo" "$pr" "$comment_id" \
-            "${answer}\n\n— ${BOT_SIGNATURE}"
+        log "ANSWER generated for comment #${comment_id} — included in batch summary"
         mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "answered"
         record_metric "answered" "$fix_duration"
-        log "Answered question on comment #${comment_id}"
         return 0
     fi
 
@@ -1118,8 +1132,7 @@ Instructions:
         if [[ $review_attempt -ge $max_review_attempts ]]; then
             log "Reviewer rejected all ${max_review_attempts} attempts. Escalating to human."
             cd "$repo_dir" && git checkout -- . 2>/dev/null || true
-            reply_to_review_comment "$repo" "$pr" "$comment_id" \
-                "🔍 **Code review blocked** — The independent reviewer rejected ${max_review_attempts} fix attempts.\n\nLast rejection reason: ${rejection_reason}\n\nThis has been escalated for human review.\n\n— ${BOT_SIGNATURE}"
+            # Telegram only — no GitHub reply
             tg_send "🔍 *Reviewer blocked fix on ${repo} PR #${pr}* after ${max_review_attempts} attempts\nReason: ${rejection_reason}"
             mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "reviewer_blocked"
             record_metric "failed" "$fix_duration" "reviewer_blocked"
@@ -1213,8 +1226,8 @@ Instructions:
             cd "$repo_dir" && git checkout -- . 2>/dev/null || true
             local fail_msg
             fail_msg=$(echo "$retry_output" | grep -E "FAILED:|NEEDS_CLARIFICATION:|SUBJECTIVE:" | head -1)
-            reply_to_review_comment "$repo" "$pr" "$comment_id" \
-                "⚠️ **Could not find a safe fix** after ${review_attempt} attempt(s).\n\n${fail_msg}\n\nNeeds human review.\n\n— ${BOT_SIGNATURE}"
+            # Telegram only — no GitHub reply
+            tg_send "⚠️ *Could not fix comment on ${repo} PR #${pr}* after ${review_attempt} attempt(s).\n${fail_msg}"
             mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "reviewer_blocked"
             record_metric "failed" "$fix_duration" "fixer_gave_up"
             return 1
@@ -1266,8 +1279,7 @@ Instructions:
     if ! git pull --rebase origin "$branch" 2>/dev/null; then
         log "CONFLICT detected on branch ${branch}, aborting rebase"
         git rebase --abort 2>/dev/null || true
-        reply_to_review_comment "$repo" "$pr" "$comment_id" \
-            "⚠️ **Merge conflict detected** — The branch has diverged. Please resolve conflicts manually, then use \`/agent retry\` to re-attempt.\n\n— ${BOT_SIGNATURE}"
+        # Telegram only — no GitHub reply
         tg_send "⚠️ *Conflict on ${repo} PR #${pr}*\nBranch ${branch} has conflicts after fix attempt."
         mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "conflict"
         record_metric "failed" "$fix_duration" "merge_conflict"
@@ -1277,8 +1289,8 @@ Instructions:
     # Push
     if ! git push origin "$branch" 2>/dev/null; then
         log "ERROR: git push failed for branch ${branch}"
-        reply_to_review_comment "$repo" "$pr" "$comment_id" \
-            "⚠️ **Push failed** — Could not push the fix. Needs human review.\n\n— ${BOT_SIGNATURE}"
+        # Telegram only — no GitHub reply
+        tg_send "⚠️ *Push failed on ${repo} PR #${pr}*. Needs human review."
         mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "push_failed"
         record_metric "failed" "$fix_duration" "push_failed"
         return 1
@@ -1330,9 +1342,8 @@ Instructions:
 
     if [[ "$ci_all_green" != "true" ]]; then
         log "CI could not be made green after ${max_ci_attempts} attempts on PR #${pr}"
+        # Telegram only — no GitHub reply
         tg_send "🔴 *CI still failing on ${repo} PR #${pr}* after ${max_ci_attempts} repair attempts. Needs human intervention."
-        reply_to_review_comment "$repo" "$pr" "$comment_id" \
-            "⚠️ **Fix applied but CI still failing** after ${max_ci_attempts} repair attempts.\n\nThe code change has been pushed but the pipeline needs human attention.\n\n— ${BOT_SIGNATURE}"
         mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "ci_failing" "$(git rev-parse HEAD 2>/dev/null | cut -c1-7)"
         record_metric "failed" "$fix_duration" "ci_repair_exhausted"
         return 1
@@ -1341,35 +1352,428 @@ Instructions:
     local commit_sha
     commit_sha=$(git rev-parse HEAD 2>/dev/null | cut -c1-7) || true
 
-    # All green — build success reply
-    local reply="✅ **Resolved** — ${fix_summary}"
-    [[ -n "$file_path" && "$file_path" != "" ]] && reply+="\n\n**File:** \`${file_path}\`"
-    reply+="\n**Reviewer:** ✅ No impact on existing functionality"
-    reply+="\n**CI Pipeline:** 🟢 All checks green"
-    [[ $ci_attempt -gt 1 ]] && reply+="\n**CI Repairs:** Fixed pipeline in ${ci_attempt} attempt(s)"
-    reply+="\n\n— ${BOT_SIGNATURE}"
+    # All green — mark resolved, NO per-comment GitHub reply
+    # The batch function posts a single consolidated summary to the PR.
     commit_sha=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
     mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "fixed" "$commit_sha"
     record_fix_timestamp
     record_metric "fixed" "$fix_duration"
+    log "Comment #${comment_id} resolved silently. Commit: ${commit_sha}. Batch summary will post once."
 
-    # Notify Linear [UPDATED - Post-CI]
-    if [[ -n "$linear_ticket_id" ]]; then
-        local fixed_label="Fixed"
-        [[ $ci_attempt -gt 1 ]] && fixed_label="Repaired + Fixed"
-        
-        local linear_comment="### 🔧 PR Resolver Fixed & Verified
-**Issue:** Resolving review comment #${comment_id}
-**File:** \`${file_path}\`
-**Change:** ${fix_summary}
-**CI Status:** ✅ All checks passed (after $((ci_attempt - 1)) repair attempts)
-**Commit:** \`${commit_sha}\`
+    return 0
+}
 
----
-*Verified Green 🟢*"
-        if linear_post_comment "$linear_ticket_id" "$linear_comment"; then
-            log "Posted summary to Linear ticket ${linear_ticket_id}"
+###############################################################################
+# BATCH MODE: Resolve ALL actionable comments in one fixer call, one push
+###############################################################################
+
+resolve_all_comments_batch() {
+    local repo="$1" pr="$2" branch="$3"
+    local linear_context="$4" linear_ticket_id="$5"
+    # comments_json_lines: path to a temp file containing one JSON object per line
+    # each line: {id, user, path, line, body, intent}
+    local comments_file="$6"
+    local fix_start_time
+    fix_start_time=$(date +%s)
+
+    local repo_name repo_dir
+    repo_name=$(echo "$repo" | cut -d/ -f2)
+    repo_dir="${REPOS_BASE_DIR:-${HOME}/repos}/${repo_name}"
+
+    # Clone/pull the repo if needed
+    if [[ ! -d "$repo_dir" ]]; then
+        log "Cloning ${repo}..."
+        local clone_url="https://${BOT_GITHUB_USER:-AdityaRuh}:${GH_TOKEN:-${GITHUB_TOKEN:-}}@github.com/${repo}.git"
+        git clone "$clone_url" "$repo_dir" 2>/dev/null || {
+            log "ERROR: Failed to clone ${repo}"
+            return 1
+        }
+    fi
+
+    # Checkout PR branch, fully up to date
+    cd "$repo_dir"
+    git fetch origin "$branch" 2>/dev/null || true
+    git stash 2>/dev/null || true
+    git checkout dev 2>/dev/null || true
+    git pull origin dev 2>/dev/null || true
+    git checkout -B "$branch" "origin/$branch" 2>/dev/null || git checkout "$branch"
+    git merge dev 2>/dev/null || true
+
+    # Full PR diff context
+    local diff_context changed_files
+    diff_context=$(extract_pr_diff_context "$repo" "$pr") || true
+    changed_files=$(get_pr_changed_files "$repo" "$pr") || true
+
+    # Detect test command
+    local test_cmd="echo 'no tests configured'"
+    if [[ -f "pyproject.toml" ]] || [[ -f "setup.py" ]]; then
+        test_cmd="pytest --tb=short -q 2>&1 | tail -20"
+    elif [[ -f "package.json" ]]; then
+        test_cmd="npm test 2>&1 | tail -20"
+    fi
+
+    # Build the numbered comment list for the prompt
+    local comment_list=""
+    local comment_count=0
+    local comment_ids=()
+    local comment_intents=()
+    local comment_authors=()
+
+    while IFS= read -r json_line; do
+        echo "$json_line" | jq -e '.id' >/dev/null 2>&1 || continue
+        local c_id c_author c_path c_line c_body c_intent
+        c_id=$(echo "$json_line" | jq -r '.id')
+        c_author=$(echo "$json_line" | jq -r '.user')
+        c_path=$(echo "$json_line" | jq -r '.path // ""')
+        c_line=$(echo "$json_line" | jq -r '.line // 0')
+        c_body=$(echo "$json_line" | jq -r '.body // ""')
+        c_intent=$(echo "$json_line" | jq -r '.intent // "CODE_CHANGE"')
+
+        ((comment_count++)) || true
+        comment_ids+=("$c_id")
+        comment_intents+=("$c_intent")
+        comment_authors+=("$c_author")
+
+        comment_list+=""
+        comment_list+="### Comment #${comment_count} (ID: ${c_id}) — ${c_intent}\n"
+        [[ -n "$c_path" && "$c_path" != "" ]] && comment_list+="File: \`${c_path}\` line ${c_line}\n"
+        comment_list+="Author: @${c_author}\n"
+        comment_list+="\"\"\"\n${c_body}\n\"\"\"\n\n"
+    done < "$comments_file"
+
+    if [[ $comment_count -eq 0 ]]; then
+        log "BATCH: No comments to process"
+        return 0
+    fi
+
+    log "BATCH: Sending ${comment_count} comment(s) to fixer in one shot"
+
+    # Build the unified prompt
+    local prompt=""
+    [[ -n "$linear_context" ]] && prompt+="${linear_context}\n\n---\n\n"
+
+    prompt+="## PR Diff Context\nChanged files in this PR:\n${changed_files}\n\nDiff:\n\`\`\`diff\n${diff_context}\n\`\`\`\n\n---\n\n"
+    prompt+="You are resolving ALL review comments on ${repo} PR #${pr} (branch: \`${branch}\`).\n\n"
+    prompt+="## All Review Comments To Resolve\n\n${comment_list}"
+    prompt+="## Instructions\n"
+    prompt+="1. Read ALL ${comment_count} comments above carefully.\n"
+    prompt+="2. For each comment:\n"
+    prompt+="   - Understand exactly what change is being requested\n"
+    prompt+="   - Locate the relevant code in the repo\n"
+    prompt+="   - Make the minimal, targeted fix for that specific comment\n"
+    prompt+="3. Apply ALL fixes across ALL comments in one pass before validating.\n"
+    prompt+="4. Only modify files listed in the PR diff: ${changed_files}\n"
+    prompt+="5. Run: ${test_cmd}\n"
+    prompt+="6. If tests pass → output:\n"
+    prompt+="   CONFIDENCE: HIGH|MEDIUM|LOW\n"
+    prompt+="   RISK: LOW|MEDIUM|HIGH\n"
+    prompt+="   SUMMARY: <one-line summary of all changes made>\n"
+    prompt+="   FIXED_IDS: ${comment_ids[*]}\n"
+    prompt+="7. If a specific comment cannot be addressed (ambiguous/subjective), skip it and note:\n"
+    prompt+="   SKIPPED_ID: <id> REASON: <why>\n"
+    prompt+="8. If tests fail → revert all changes and output: FAILED: <what went wrong>\n"
+    prompt+="9. IMPORTANT: Do NOT commit or push. Only modify files on disk. The orchestrator handles git.\n"
+    prompt+="\nRules:\n"
+    prompt+="- Fix ALL comments in this single pass — do not stop after the first one\n"
+    prompt+="- Touch ONLY files in the PR diff\n"
+    prompt+="- Match existing code style and conventions\n"
+    prompt+="- Never delete tests — only update them\n"
+
+    # Call fixer agent (single call for all comments)
+    local output=""
+    local exit_code=0
+    local agent_log="${LOG_DIR}/pr-resolve-batch-${repo_name}-${pr}-$(date +%s).log"
+    local fixer_session_id="pr-batch-fix-$(date +%s)-$$-${RANDOM}"
+
+    log "BATCH: Calling fixer agent (timeout: ${OPENCLAW_TIMEOUT}s)..."
+    output=$(cd "$repo_dir" && timeout "$OPENCLAW_TIMEOUT" openclaw agent --local \
+        \
+        --session-id "$fixer_session_id" \
+        --message "$prompt" \
+        --timeout "$OPENCLAW_TIMEOUT" \
+        2>&1 | tee "$agent_log") || exit_code=$?
+
+    local fix_duration=$(( $(date +%s) - fix_start_time ))
+
+    if [[ $exit_code -eq 124 ]]; then
+        log "BATCH: TIMEOUT — fixer agent exceeded ${OPENCLAW_TIMEOUT}s"
+        tg_send "⏱️ *PR Resolver BATCH timeout* on ${repo} PR #${pr}\nAll ${comment_count} comments will need human review."
+        return 1
+    fi
+
+    if echo "$output" | grep -q "^FAILED:"; then
+        local failure
+        failure=$(echo "$output" | grep "^FAILED:" | head -1 | sed 's/^FAILED: *//')
+        log "BATCH: Fixer reported FAILED: ${failure}"
+        cd "$repo_dir" && git checkout -- . 2>/dev/null || true
+        tg_send "❌ *PR Resolver BATCH failed* on ${repo} PR #${pr}\n${failure}"
+        # Mark all as failed
+        for c_id in "${comment_ids[@]}"; do
+            mark_comment_processed "$repo" "$pr" "$c_id" "CODE_CHANGE" "failed"
+        done
+        record_metric "failed" "$fix_duration" "batch_agent_failed"
+        return 1
+    fi
+
+    # Parse confidence/risk/summary
+    local confidence risk fix_summary
+    confidence=$(echo "$output" | grep -Ei "^CONFIDENCE:" | head -1 | grep -oE '(HIGH|MEDIUM|LOW)' | head -1 || echo "MEDIUM")
+    risk=$(echo "$output" | grep -Ei "^RISK:" | head -1 | grep -oE '(HIGH|MEDIUM|LOW)' | head -1 || echo "MEDIUM")
+    fix_summary=$(echo "$output" | grep -Ei "^SUMMARY:" | head -1 | sed 's/^SUMMARY: *//' | head -c 120 || echo "Resolve all review comments")
+    log "BATCH: fixer assessment — confidence=${confidence} risk=${risk}"
+    log "BATCH: summary — ${fix_summary}"
+
+    # Parse any skipped IDs
+    local skipped_ids=()
+    while IFS= read -r skip_line; do
+        local skip_id
+        skip_id=$(echo "$skip_line" | grep -oE 'SKIPPED_ID: [0-9]+' | grep -oE '[0-9]+' | head -1)
+        [[ -n "$skip_id" ]] && skipped_ids+=("$skip_id")
+    done < <(echo "$output" | grep "SKIPPED_ID:")
+
+    # Independent reviewer — check batch diff for regressions
+    log "BATCH: Running independent reviewer..."
+    local max_review_attempts=3
+    local review_attempt=1
+    local previous_attempts=""
+
+    while [[ $review_attempt -le $max_review_attempts ]]; do
+        local current_diff
+        current_diff=$(cd "$repo_dir" && git diff HEAD 2>/dev/null | head -600) || true
+
+        if [[ -z "$current_diff" ]]; then
+            log "BATCH: No diff found — fixer made no changes"
+            for c_id in "${comment_ids[@]}"; do
+                mark_comment_processed "$repo" "$pr" "$c_id" "CODE_CHANGE" "unclear"
+            done
+            record_metric "failed" "$fix_duration" "batch_no_changes"
+            return 0
         fi
+
+        local combined_comments_text=""
+        local i=0
+        for c_id in "${comment_ids[@]}"; do
+            combined_comments_text+="- Comment #$((i+1)) (ID: ${c_id}): see batch prompt\n"
+            ((i++)) || true
+        done
+
+        local review_prompt
+        review_prompt="You are an independent code reviewer for an autonomous PR bot.
+
+The bot was asked to resolve ALL of these PR review comments in a single pass:
+${comment_list}
+
+The fixer produced this combined diff:
+\`\`\`diff
+${current_diff}
+\`\`\`
+
+Your job: verify the diff is SAFE to push.
+1. Does any change break existing functionality or introduce bugs?
+2. Does each change address what the corresponding comment asked?
+3. Are there any unintended side effects?
+
+If the diff is safe and addresses the comments → APPROVED
+If there is a concrete bug or regression → REJECTED: <specific reason>
+
+Output EXACTLY one of:
+  APPROVED
+  REJECTED: <1-2 sentence reason>"
+
+        local review_session_id="pr-batch-review-$(date +%s)-$$-${RANDOM}"
+        local review_output
+        review_output=$(timeout "$LLM_REVIEW_TIMEOUT" openclaw agent --local \
+            \
+            --session-id "$review_session_id" \
+            --message "$review_prompt" \
+            --timeout "$LLM_REVIEW_TIMEOUT" \
+            2>/dev/null | grep -E '^(APPROVED|REJECTED)' | head -1) || true
+
+        if echo "$review_output" | grep -q '^APPROVED'; then
+            log "BATCH: Reviewer APPROVED on attempt ${review_attempt}"
+            break
+        fi
+
+        local rejection_reason
+        rejection_reason=$(echo "$review_output" | sed 's/^REJECTED: *//')
+        log "BATCH: Reviewer REJECTED (attempt ${review_attempt}): ${rejection_reason}"
+
+        if [[ $review_attempt -ge $max_review_attempts ]]; then
+            log "BATCH: Reviewer rejected all ${max_review_attempts} attempts. Escalating."
+            cd "$repo_dir" && git checkout -- . 2>/dev/null || true
+            tg_send "🔍 *PR Resolver BATCH blocked* on ${repo} PR #${pr} after ${max_review_attempts} reviewer rejections\nReason: ${rejection_reason}"
+            for c_id in "${comment_ids[@]}"; do
+                mark_comment_processed "$repo" "$pr" "$c_id" "CODE_CHANGE" "reviewer_blocked"
+            done
+            record_metric "failed" "$fix_duration" "batch_reviewer_blocked"
+            return 1
+        fi
+
+        previous_attempts+="\n--- PREVIOUS ATTEMPT #${review_attempt} ---\nDiff:\n\`\`\`diff\n${current_diff}\n\`\`\`\nRejected because: ${rejection_reason}\n--- END ---\n"
+
+        cd "$repo_dir" && git checkout -- . 2>/dev/null || true
+        log "BATCH: Re-invoking fixer with rejection context (attempt $((review_attempt+1)))..."
+
+        local retry_prompt=""
+        [[ -n "$linear_context" ]] && retry_prompt+="${linear_context}\n\n---\n\n"
+        retry_prompt+="## PR Diff Context\nChanged files:\n${changed_files}\n\nDiff:\n\`\`\`diff\n${diff_context}\n\`\`\`\n\n---\n\n"
+        retry_prompt+="You are resolving ALL review comments on ${repo} PR #${pr} (branch: \`${branch}\`).\n\n"
+        retry_prompt+="## All Review Comments\n\n${comment_list}"
+        retry_prompt+="## Previous Attempt(s) — Reviewer Feedback\n${previous_attempts}\n"
+        retry_prompt+="Read the reviewer feedback carefully and try again, addressing the specific rejection reason.\n\n"
+        retry_prompt+="Apply ALL fixes. Output CONFIDENCE / RISK / SUMMARY / FIXED_IDS. Do NOT commit or push."
+
+        local retry_session_id="pr-batch-retry-$(date +%s)-$$-${RANDOM}"
+        output=$(cd "$repo_dir" && timeout "$OPENCLAW_TIMEOUT" openclaw agent --local \
+            \
+            --session-id "$retry_session_id" \
+            --message "$retry_prompt" \
+            --timeout "$OPENCLAW_TIMEOUT" \
+            2>/dev/null) || true
+
+        if echo "$output" | grep -q "^FAILED:"; then
+            cd "$repo_dir" && git checkout -- . 2>/dev/null || true
+            log "BATCH: Fixer gave up on retry ${review_attempt}"
+            for c_id in "${comment_ids[@]}"; do
+                mark_comment_processed "$repo" "$pr" "$c_id" "CODE_CHANGE" "reviewer_blocked"
+            done
+            record_metric "failed" "$fix_duration" "batch_fixer_gave_up"
+            return 1
+        fi
+
+        ((review_attempt++)) || true
+    done
+
+    # --- COMMIT, PUSH, CI, LINEAR ---
+    cd "$repo_dir"
+
+    local files_to_stage
+    files_to_stage=$(git diff --name-only 2>/dev/null) || true
+    if [[ -z "$files_to_stage" ]]; then
+        log "BATCH: No file changes after reviewer approval"
+        for c_id in "${comment_ids[@]}"; do
+            mark_comment_processed "$repo" "$pr" "$c_id" "CODE_CHANGE" "unclear"
+        done
+        return 0
+    fi
+
+    # Commit message: "TICKET-ID: resolve all PR review comments (P1/P2/P3)"
+    local commit_msg
+    if [[ -n "$linear_ticket_id" ]]; then
+        commit_msg="${linear_ticket_id} resolve all PR review comments"
+    else
+        commit_msg="fix: resolve all PR review comments"
+    fi
+
+    git add $files_to_stage 2>/dev/null || { log "ERROR: git add failed"; return 1; }
+    git commit -m "$commit_msg" 2>/dev/null || { log "ERROR: git commit failed"; return 1; }
+
+    # Rebase before push to avoid conflicts
+    if ! git pull --rebase origin "$branch" 2>/dev/null; then
+        log "BATCH: Merge conflict after commit, aborting rebase"
+        git rebase --abort 2>/dev/null || true
+        tg_send "⚠️ *PR Resolver BATCH conflict* on ${repo} PR #${pr}\nBranch has diverged — manual resolution needed."
+        for c_id in "${comment_ids[@]}"; do
+            mark_comment_processed "$repo" "$pr" "$c_id" "CODE_CHANGE" "conflict"
+        done
+        return 1
+    fi
+
+    if ! git push origin "$branch" 2>/dev/null; then
+        log "BATCH: Push failed for branch ${branch}"
+        tg_send "⚠️ *PR Resolver BATCH push failed* on ${repo} PR #${pr}"
+        for c_id in "${comment_ids[@]}"; do
+            mark_comment_processed "$repo" "$pr" "$c_id" "CODE_CHANGE" "push_failed"
+        done
+        return 1
+    fi
+
+    log "BATCH: Pushed commit. Watching CI..."
+
+    # CI observation loop
+    local ci_attempt=1
+    local max_ci_attempts=5
+    local ci_all_green=false
+
+    while [[ $ci_attempt -le $max_ci_attempts ]]; do
+        wait_for_pr_checks "$repo" "$pr"
+        local ci_status=$?
+        if [[ $ci_status -eq 0 ]]; then
+            log "BATCH: CI ALL GREEN 🟢 (attempt ${ci_attempt})"
+            ci_all_green=true
+            break
+        elif [[ $ci_status -eq 1 ]]; then
+            log "BATCH: CI FAILED — fetching logs and repairing (${ci_attempt}/${max_ci_attempts})"
+            local fail_logs
+            fail_logs=$(extract_failing_log_context "$repo" "$pr") || true
+            if [[ -n "$fail_logs" ]]; then
+                resolve_ci_failure "$repo" "$pr" "$branch" "batch" "" "$linear_context" "$fail_logs" || true
+            fi
+            ((ci_attempt++)) || true
+        else
+            log "BATCH: CI observation timeout, retrying..."
+            ((ci_attempt++)) || true
+        fi
+    done
+
+    local commit_sha
+    commit_sha=$(git rev-parse HEAD 2>/dev/null | cut -c1-7) || true
+
+    if [[ "$ci_all_green" != "true" ]]; then
+        log "BATCH: CI still failing after ${max_ci_attempts} attempts"
+        tg_send "🔴 *CI still failing* on ${repo} PR #${pr} after ${max_ci_attempts} repair attempts. Needs human intervention."
+        for c_id in "${comment_ids[@]}"; do
+            mark_comment_processed "$repo" "$pr" "$c_id" "CODE_CHANGE" "ci_failing" "$commit_sha"
+        done
+        record_metric "failed" "$fix_duration" "batch_ci_repair_exhausted"
+        return 1
+    fi
+
+    # Mark all comments as resolved
+    local resolved_count=0
+    for c_id in "${comment_ids[@]}"; do
+        # Check if this was skipped
+        local was_skipped=false
+        for s_id in "${skipped_ids[@]}"; do
+            [[ "$s_id" == "$c_id" ]] && was_skipped=true && break
+        done
+        if [[ "$was_skipped" == "true" ]]; then
+            mark_comment_processed "$repo" "$pr" "$c_id" "CODE_CHANGE" "skipped"
+        else
+            mark_comment_processed "$repo" "$pr" "$c_id" "CODE_CHANGE" "fixed" "$commit_sha"
+            ((resolved_count++)) || true
+        fi
+    done
+
+    record_fix_timestamp
+    record_metric "fixed" "$fix_duration"
+    TOTAL_FIXES=$((TOTAL_FIXES + resolved_count))
+
+    log "BATCH: All done — ${resolved_count}/${comment_count} fixed, commit ${commit_sha}, CI green"
+
+    # Post single summary comment on PR
+    local summary_reply="✅ **Batch Resolved — ${resolved_count}/${comment_count} comments**\n\n"
+    summary_reply+="${fix_summary}\n\n"
+    summary_reply+="**Commit:** \`${commit_sha}\`\n"
+    summary_reply+="**CI Pipeline:** 🟢 All checks green\n"
+    [[ ${#skipped_ids[@]} -gt 0 ]] && summary_reply+="**Skipped (needs human):** ${#skipped_ids[@]} comment(s)\n"
+    summary_reply+="\n— ${BOT_SIGNATURE}"
+    reply_to_issue_comment "$repo" "$pr" "$summary_reply"
+
+    # Move Linear ticket to Code Review
+    if [[ -n "$linear_ticket_id" && $resolved_count -gt 0 && ${#skipped_ids[@]} -eq 0 ]]; then
+        log "BATCH: All comments resolved. Moving ${linear_ticket_id} to Code Review..."
+        if linear_update_status "$linear_ticket_id" "CODE REVIEW"; then
+            log "BATCH: Linear ticket ${linear_ticket_id} moved to Code Review ✅"
+            local linear_comment="### 🚀 Moved to Code Review\nAll ${resolved_count} review comment(s) resolved in a single batch pass.\nCI: ✅ All checks green.\nCommit: \`${commit_sha}\`\n\n— *PR Resolver (automated)*"
+            linear_post_comment "$linear_ticket_id" "$linear_comment" 2>/dev/null || true
+        else
+            log "BATCH: WARNING — Could not move ${linear_ticket_id} to Code Review"
+            tg_send "⚠️ *PR Resolver* — Could not move ${linear_ticket_id} to Code Review after batch fix."
+        fi
+    elif [[ ${#skipped_ids[@]} -gt 0 ]]; then
+        log "BATCH: ${#skipped_ids[@]} skipped comment(s) — NOT moving to Code Review yet"
+        tg_send "⚠️ *PR Resolver BATCH* on ${repo} PR #${pr}\n${resolved_count} fixed, ${#skipped_ids[@]} skipped (subjective/ambiguous). Ticket stays in Require Changes."
     fi
 
     return 0
@@ -1430,31 +1834,28 @@ process_pr() {
         fi
     fi
 
-    # Get both review comments and issue comments as JSON lines
+    # Fetch ALL comments (review + issue)
     local all_comments_file="${STATE_DIR}/.tmp-comments-${pr}.jsonl"
     > "$all_comments_file"
     get_review_comments "$repo" "$pr" >> "$all_comments_file" 2>/dev/null
     get_issue_comments "$repo" "$pr" >> "$all_comments_file" 2>/dev/null
 
-    local comment_count
-    comment_count=$(grep -c '{' "$all_comments_file" 2>/dev/null | tr -d '[:space:]' || echo "0")
-    comment_count="${comment_count##*$'\n'}"  # strip any newlines
-    [[ "${comment_count:-0}" -eq 0 ]] && {
+    local raw_count
+    raw_count=$(grep -c '{' "$all_comments_file" 2>/dev/null || echo "0")
+    if [[ "${raw_count:-0}" -eq 0 ]]; then
         log "No comments found on PR #${pr}"
         rm -f "$all_comments_file"
         return 0
-    }
+    fi
 
-    # Track actionable comments for partial fix reporting (Enhancement #4)
-    local actionable_total=0
-    local actionable_resolved=0
-    local actionable_failed=0
+    # --- PASS 1: Classify every comment, handle non-actionable ones immediately ---
+    # Actionable comments are written to a batch file for the single fixer call.
+    local batch_file="${STATE_DIR}/.tmp-batch-${pr}.jsonl"
+    > "$batch_file"
 
     while IFS= read -r json_line; do
-        # Skip non-JSON lines
         echo "$json_line" | jq -e '.id' >/dev/null 2>&1 || continue
 
-        # Parse JSON fields safely
         local comment_id author file_path line body
         comment_id=$(echo "$json_line" | jq -r '.id')
         author=$(echo "$json_line" | jq -r '.user')
@@ -1462,10 +1863,7 @@ process_pr() {
         line=$(echo "$json_line" | jq -r '.line // 0')
         body=$(echo "$json_line" | jq -r '.body // ""')
 
-        # Skip empty
         [[ -z "$comment_id" || "$comment_id" == "null" ]] && continue
-
-        # Skip bot's own comments
         [[ "$author" == "$BOT_GITHUB_USER" ]] && continue
 
         # Skip already processed
@@ -1473,119 +1871,77 @@ process_pr() {
             continue
         fi
 
-        # Classify (FREE — no credits)
+        # Classify
         local intent
         intent=$(classify_comment "$body")
 
-        # Handle agent commands (Enhancement #7)
+        # Agent commands — handle immediately
         if [[ "$intent" == "AGENT_COMMAND" ]]; then
             handle_agent_command "$repo" "$pr" "$comment_id" "$body" "$author"
             continue
         fi
 
+        # Non-actionable — skip/flag immediately, ZERO GitHub output
         case "$intent" in
-            SELF|CI_BOT|APPROVAL|UNKNOWN|COVERAGE_POLICY)
+            SELF|CI_BOT|APPROVAL|UNKNOWN|COVERAGE_POLICY|SENTINEL_REVIEW|OBSERVATION)
                 mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "skipped"
                 record_metric "skipped"
+                log "Silently skipped comment #${comment_id} (intent: ${intent})"
                 continue
                 ;;
             SUBJECTIVE)
                 local body_short
                 body_short=$(echo "$body" | head -c 200 | tr '\n' ' ')
-                tg_send "🤔 *Subjective comment on ${repo} PR #${pr}*
-By @${author}: ${body_short}"
+                tg_send "🤔 *Subjective comment on ${repo} PR #${pr}*\nBy @${author}: ${body_short}"
                 mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "flagged"
                 record_metric "flagged"
-                log "Flagged subjective comment #${comment_id} to Telegram"
+                log "Flagged subjective comment #${comment_id} to Telegram (no GitHub reply)"
                 continue
                 ;;
         esac
 
-        # This is an actionable comment
-        ((actionable_total++)) || true
-        mark_comment_pending "$repo" "$pr" "$comment_id"
-
-        # Idempotency check — fix signature (Enhancement #2)
+        # Idempotency check
         local fix_sig
         fix_sig=$(compute_fix_signature "$body" "$file_path" "$intent")
         if is_fix_duplicate "$fix_sig"; then
-            log "Duplicate fix signature detected for comment #${comment_id}, skipping"
+            log "Duplicate fix signature for comment #${comment_id}, skipping"
             mark_comment_processed "$repo" "$pr" "$comment_id" "$intent" "duplicate"
             record_metric "skipped"
             continue
         fi
 
-        # Rate limit check
-        local current_fixes
-        current_fixes=$(get_pr_fix_count "$repo" "$pr")
-        if [[ "$current_fixes" -ge "$MAX_FIXES_PER_PR" ]]; then
-            log "Rate limit reached for ${repo} PR #${pr} (${current_fixes}/${MAX_FIXES_PER_PR})"
-            break
-        fi
-        if [[ "$fixes_this_pr" -ge "$MAX_FIXES_PER_PR" ]]; then
-            log "Per-cycle rate limit for PR #${pr}"
-            break
-        fi
-
-        # Budget guard check
-        if ! check_hourly_budget; then
-            log "Hourly budget exhausted mid-PR"
-            break
-        fi
-
-        # Resolve via OpenClaw with retry (Enhancement #5)
-        if resolve_comment_with_retry "$repo" "$pr" "$branch" "$comment_id" \
-            "$author" "$file_path" "$line" "$body" "$intent" \
-            "$linear_context" "$linear_ticket_id"; then
-            ((actionable_resolved++)) || true
-            # Record signature on success
-            record_fix_signature "$fix_sig" "$repo" "$pr" "$comment_id" "fixed"
-        else
-            ((actionable_failed++)) || true
-            record_fix_signature "$fix_sig" "$repo" "$pr" "$comment_id" "failed"
-        fi
-
-        ((fixes_this_pr++)) || true
-        ((TOTAL_FIXES++)) || true
-
-        # Global rate limit
-        if [[ "${TOTAL_FIXES:-0}" -ge "$MAX_FIXES_PER_CYCLE" ]]; then
-            log "Global rate limit reached (${TOTAL_FIXES}/${MAX_FIXES_PER_CYCLE})"
-            break
-        fi
+        # Actionable — add intent field and queue for batch
+        echo "$json_line" | jq --arg intent "$intent" '. + {intent: $intent}' >> "$batch_file"
+        mark_comment_pending "$repo" "$pr" "$comment_id"
 
     done < "$all_comments_file"
-
     rm -f "$all_comments_file"
 
-    # Post partial fix summary if there are mixed results (Enhancement #4)
-    local actionable_remaining=$((actionable_total - actionable_resolved - actionable_failed))
-    if [[ "$actionable_total" -gt 1 && ("$actionable_failed" -gt 0 || "$actionable_remaining" -gt 0) ]]; then
-        local summary_body="📊 **PR Comment Resolution Summary**\n\n"
-        summary_body+="- ✅ Resolved: ${actionable_resolved}/${actionable_total}\n"
-        [[ "$actionable_failed" -gt 0 ]] && summary_body+="- ❌ Failed: ${actionable_failed}\n"
-        [[ "$actionable_remaining" -gt 0 ]] && summary_body+="- ⏳ Remaining: ${actionable_remaining} (will process in next cycle)\n"
-        summary_body+="\n— ${BOT_SIGNATURE}"
-        reply_to_issue_comment "$repo" "$pr" "$summary_body"
+    local batch_count
+    batch_count=$(grep -c '{' "$batch_file" 2>/dev/null || echo "0")
+
+    if [[ "${batch_count:-0}" -eq 0 ]]; then
+        log "No actionable comments to fix on PR #${pr}"
+        rm -f "$batch_file"
+        return 0
     fi
 
-    # STEP 13: Move Linear ticket to "Code Review" when ALL comments are resolved
-    # and there are no failures or remaining comments to process.
-    if [[ -n "$passed_linear_ticket_id" && "$actionable_total" -gt 0 && \
-          "$actionable_resolved" -eq "$actionable_total" && "$actionable_failed" -eq 0 ]]; then
-        log "All ${actionable_total} comments resolved on PR #${pr}. Moving ticket ${passed_linear_ticket_id} to 'Code Review'..."
-        if linear_update_status "$passed_linear_ticket_id" "Code Review"; then
-            log "Linear ticket ${passed_linear_ticket_id} moved to 'Code Review' ✅"
-            local transition_comment="### 🚀 Moved to Code Review
-All ${actionable_total} review comment(s) have been resolved and CI is green.
-Ticket has been moved to **Code Review** for human sign-off.
+    log "BATCH MODE: ${batch_count} actionable comment(s) queued — resolving in ONE fixer call"
 
-— *PR Resolver (automated)*"
-            linear_post_comment "$passed_linear_ticket_id" "$transition_comment" 2>/dev/null || true
-        else
-            log "WARNING: Failed to move ticket ${passed_linear_ticket_id} to 'Code Review'"
-        fi
+    # Budget guard before the batch call
+    if ! check_hourly_budget; then
+        log "Hourly budget exhausted, skipping batch for PR #${pr}"
+        rm -f "$batch_file"
+        return 0
     fi
+
+    # --- PASS 2: ONE fixer call for ALL actionable comments ---
+    resolve_all_comments_batch \
+        "$repo" "$pr" "$branch" \
+        "$linear_context" "$passed_linear_ticket_id" \
+        "$batch_file"
+
+    rm -f "$batch_file"
 }
 
 ###############################################################################
